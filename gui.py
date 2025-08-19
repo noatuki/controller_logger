@@ -4,10 +4,10 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QListWidget, QListWidgetItem, QTabWidget, QToolBar,
     QStatusBar, QSystemTrayIcon, QMenu, QStyle, QSplitter, QFrame,
     QSizePolicy, QSpacerItem, QAbstractItemView, QTableView, QHeaderView, QMessageBox,
-    QGroupBox, QRadioButton, QSlider
+    QGroupBox, QRadioButton, QSlider, QButtonGroup
 )
 from PySide6.QtCore import QThread, Signal, QTimer, Qt, QSize, QAbstractTableModel, QModelIndex
-from PySide6.QtGui import QIcon, QGuiApplication, QAction
+from PySide6.QtGui import QIcon, QGuiApplication, QAction, QShortcut, QKeySequence
 
 import time
 import os
@@ -83,7 +83,7 @@ class InputDisplayView(QWidget):
         super().__init__(parent)
         self.setMinimumSize(480, 220)
         root = QVBoxLayout(self)
-        title = QLabel("コントローラ入力 (LIVE)")
+        title = QLabel("コントローラ入力")
         title.setStyleSheet("font-size:14px; font-weight:600;")
         root.addWidget(title)
 
@@ -799,37 +799,110 @@ class SessionListPanel(QWidget):
                 os.system(f'xdg-open "{os.path.abspath(path)}"')
 
 class Sidebar(QWidget):
+    collapsed_changed = Signal(bool)
+    
     def __init__(self, on_navigate, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(220)
+        self.setFixedWidth(240)
         self.setObjectName("Sidebar")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        title = QLabel("Controller Logger")
-        title.setObjectName("sidebarTitle")
-        title.setStyleSheet("font-size:16px; font-weight:700;")
-        layout.addWidget(title)
-
-        self.btn_live = QPushButton("ライブ")
-        self.btn_sessions = QPushButton("セッション")
-        self.btn_settings = QPushButton("設定")
-        for b in (self.btn_live, self.btn_sessions, self.btn_settings):
+        self._collapsed = False
+    
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+    
+        # ヘッダー（アイコン＋タイトル＋設定ショートカット）
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        icon_label = QLabel()
+        icon_label.setPixmap(self.style().standardIcon(QStyle.SP_ComputerIcon).pixmap(18, 18))
+        self.title_label = QLabel("Controller Logger")
+        self.title_label.setObjectName("sidebarTitle")
+        self.title_label.setStyleSheet("font-size:15px; font-weight:700;")
+        header.addWidget(icon_label)
+        header.addSpacing(6)
+        header.addWidget(self.title_label, 1)
+        self.btn_quick_settings = QPushButton()
+        self.btn_quick_settings.setObjectName("sidebarGear")
+        self.btn_quick_settings.setToolTip("設定")
+        self.btn_quick_settings.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.btn_quick_settings.setCursor(Qt.PointingHandCursor)
+        self.btn_quick_settings.setFlat(True)
+        self.btn_quick_settings.setFixedSize(28, 24)
+        self.btn_quick_settings.clicked.connect(lambda: on_navigate(2))
+        header.addWidget(self.btn_quick_settings)
+        root.addLayout(header)
+    
+        # セパレータ
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        root.addWidget(line)
+    
+        # ナビゲーションボタン（アイコン付き・排他）
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self._nav_buttons = []
+    
+        def make_btn(text: str, icon: QIcon, idx: int):
+            b = QPushButton(text)
+            b.setObjectName("navBtn")
+            b.setIcon(icon)
+            b.setIconSize(QSize(18, 18))
             b.setCursor(Qt.PointingHandCursor)
             b.setCheckable(True)
-            b.setStyleSheet("text-align:left; padding:8px 10px;")
-            layout.addWidget(b)
-        layout.addStretch(1)
-
+            b.setToolTip(text)
+            b.clicked.connect(lambda: on_navigate(idx))
+            self.group.addButton(b, idx)
+            root.addWidget(b)
+            self._nav_buttons.append(b)
+            return b
+    
+        style = self.style()
+        self.btn_live = make_btn("Controller入力", style.standardIcon(QStyle.SP_MediaPlay), 0)
+        self.btn_sessions = make_btn("Logファイル", style.standardIcon(QStyle.SP_DirOpenIcon), 1)
+        self.btn_settings = make_btn("設定", style.standardIcon(QStyle.SP_FileDialogDetailedView), 2)
+    
+        # 余白で下に押し下げ
+        root.addStretch(1)
+    
+        # 折りたたみボタン
+        self.btn_collapse = QPushButton("サイドバーを折りたたむ")
+        self.btn_collapse.setObjectName("navBtn")
+        self.btn_collapse.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.btn_collapse.setCursor(Qt.PointingHandCursor)
+        self.btn_collapse.clicked.connect(self.toggle_collapsed)
+        root.addWidget(self.btn_collapse)
+    
+        # 既定選択
         self.btn_live.setChecked(True)
-
-        self.btn_live.clicked.connect(lambda: on_navigate(0))
-        self.btn_sessions.clicked.connect(lambda: on_navigate(1))
-        self.btn_settings.clicked.connect(lambda: on_navigate(2))
-
+    
     def set_active(self, idx: int):
         self.btn_live.setChecked(idx == 0)
         self.btn_sessions.setChecked(idx == 1)
         self.btn_settings.setChecked(idx == 2)
+    
+    def set_collapsed(self, collapsed: bool):
+        self._collapsed = bool(collapsed)
+        if self._collapsed:
+            self.setFixedWidth(64)
+            self.title_label.setVisible(False)
+            for b in self._nav_buttons:
+                b.setText("")
+            self.btn_collapse.setText("展開")
+            self.btn_collapse.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        else:
+            self.setFixedWidth(240)
+            self.title_label.setVisible(True)
+            self.btn_live.setText("Controller入力")
+            self.btn_sessions.setText("Logファイル")
+            self.btn_settings.setText("設定")
+            self.btn_collapse.setText("サイドバーを折りたたむ")
+            self.btn_collapse.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.collapsed_changed.emit(self._collapsed)
+    
+    def toggle_collapsed(self):
+        self.set_collapsed(not self._collapsed)
 
 # メインウィンドウ
 class MainWindow(QMainWindow):
@@ -888,6 +961,13 @@ class MainWindow(QMainWindow):
 
         # サイドバー + タブ
         self.sidebar = Sidebar(self._navigate)
+        # 折りたたみ状態の復元
+        try:
+            self.sidebar.set_collapsed(bool(self.config.get("sidebar_collapsed", False)))
+        except Exception:
+            pass
+        self.sidebar.collapsed_changed.connect(self._on_sidebar_collapsed)
+
         self.tabs = QTabWidget()
         self.tabs.setTabPosition(QTabWidget.North)
 
@@ -898,12 +978,12 @@ class MainWindow(QMainWindow):
         self.input_display = InputDisplayView()
         live_layout.addWidget(self.status_label)
         live_layout.addWidget(self.input_display, 1)
-        self.tabs.addTab(live_tab, "ライブ")
+        self.tabs.addTab(live_tab, "Controller入力")
 
-        # セッションタブ
+        # Logファイルタブ
         self.sessions_panel = SessionListPanel()
         self.sessions_panel.set_directory(self.config.get("save_dir", "logs"))
-        self.tabs.addTab(self.sessions_panel, "セッション")
+        self.tabs.addTab(self.sessions_panel, "Logファイル")
 
         # 設定タブ（リッチ編集UI）
         self.settings_panel = SettingsPanel(self.config)
@@ -966,6 +1046,14 @@ class MainWindow(QMainWindow):
         # 設定はインライン編集に変更
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
+        # キーボードショートカット (Ctrl+1/2/3)
+        try:
+            QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self._navigate(0))
+            QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self._navigate(1))
+            QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self._navigate(2))
+        except Exception:
+            pass
+
         # UI更新タイマーと最新値バッファ
         self.latest_axes = []
         self.latest_buttons = []
@@ -1004,20 +1092,44 @@ class MainWindow(QMainWindow):
                 background:#202225;
                 border:0;
             }
-            QLabel#sidebarTitle {
-                color:#FFFFFF;
-            }
+            /* サイドバー */
             QWidget#Sidebar {
                 background:#23262A;
             }
-            QPushButton {
-                background:transparent;
+            QLabel#sidebarTitle {
                 color:#FFFFFF;
             }
-            QPushButton:checked {
-                background:#2D2F33;
+            /* サイドバー内ナビボタン */
+            QWidget#Sidebar QPushButton#navBtn {
+                background:transparent;
+                color:#FFFFFF;
+                text-align:left;
+                padding:10px 12px;
+                border:0;
+                border-radius:8px;
+                margin:2px 0;
+            }
+            QWidget#Sidebar QPushButton#navBtn:hover {
+                background:#2A2E33;
+            }
+            QWidget#Sidebar QPushButton#navBtn:checked {
+                background:#2D3136;
                 border-left:3px solid #5E9CFF;
             }
+            QWidget#Sidebar QPushButton#navBtn:disabled {
+                color:rgba(255,255,255,0.6);
+            }
+            /* サイドバーのクイック設定アイコン */
+            QWidget#Sidebar QPushButton#sidebarGear {
+                background:transparent;
+                border:0;
+                border-radius:6px;
+                padding:4px;
+            }
+            QWidget#Sidebar QPushButton#sidebarGear:hover {
+                background:#2A2E33;
+            }
+
             /* ツールバーの開始/停止ボタンにカラー付与 */
             QToolBar QToolButton {
                 color:#FFFFFF;
@@ -1056,6 +1168,7 @@ class MainWindow(QMainWindow):
                 color:rgba(255,255,255,0.60);
                 border-color:#7F1F1F;
             }
+
             /* 入力系の視認性を改善 */
             QLineEdit {
                 background:#2A2D31; color:#FFFFFF; border:1px solid #3A3F44; border-radius:6px; padding:6px;
@@ -1113,12 +1226,16 @@ class MainWindow(QMainWindow):
         )
         # ステータスバー右側に表示
         self.status_info.setText(f"{cfg.get('log_format','parquet')} | {cfg.get('save_dir','logs')}")
-
+    
+    def _on_sidebar_collapsed(self, collapsed: bool):
+        self.config["sidebar_collapsed"] = bool(collapsed)
+        save_config(self.config)
+    
     def _default_filename(self):
         template = self.config.get("filename_template", "%Y%m%d_%H%M%S")
         ext = ".parquet" if self.config.get("log_format", "parquet") == "parquet" else ".csv"
         return datetime.datetime.now().strftime(template) + ext
-
+    
     def start_logging(self):
         selected_format = self.config.get("log_format", "parquet")
         ext = ".parquet" if selected_format == "parquet" else ".csv"
