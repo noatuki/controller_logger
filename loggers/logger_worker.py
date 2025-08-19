@@ -1,4 +1,5 @@
 import time
+import os
 from input_reader import InputReader
 from loggers.main_logger import MainLogger
 from loggers.csv_logger import CSVLogger
@@ -13,7 +14,7 @@ class LoggerWorker:
 
     def run(self, status_callback=None, update_callback=None, sleep_func=None):
         reader = InputReader()
-        filename = self.filepath.split("/")[-1]
+        filename = os.path.basename(self.filepath)
         logger_class_map = {
             "csv": CSVLogger,
             "parquet": ParquetLogger,

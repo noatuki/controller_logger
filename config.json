@@ -1,3 +1,6 @@
 {
-  "log_format": "parquet"
+  "log_format": "parquet",
+  "save_dir": "logs",
+  "filename_template": "%Y%m%d_%H%M%S",
+  "sample_interval": 0.02
 }

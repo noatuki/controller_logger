@@ -1,10 +1,14 @@
 from PySide6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QLabel, QFileDialog,
-    QGraphicsScene, QGraphicsView, QGraphicsEllipseItem
+    QGraphicsScene, QGraphicsView, QGraphicsEllipseItem,
+    QDialog, QFormLayout, QHBoxLayout, QLineEdit, QComboBox,
+    QSpinBox, QDoubleSpinBox
 )
 from PySide6.QtCore import QThread, Signal, QTimer, Qt
 
 import time
+import os
+import json
 
 from loggers.logger_worker import LoggerWorker
 
@@ -49,6 +53,23 @@ class LoggerWorkerThread(QThread):
 
     def stop(self):
         self.worker.stop()
+
+# 設定の読み書きヘルパー
+CONFIG_PATH = "config.json"
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 # 入力キー表示用ビュー
 class InputDisplayView(QWidget):
@@ -124,6 +145,83 @@ class InputDisplayView(QWidget):
         text = "\n".join(active_keys) if active_keys else ""
         self.label.setText(text)
 
+# 設定ダイアログ
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("設定")
+        self.setModal(True)
+
+        self.cfg = load_config()
+
+        layout = QFormLayout()
+
+        # 記録方式
+        self.format_box = QComboBox()
+        self.format_box.addItems(["parquet", "csv"])
+        current_format = self.cfg.get("log_format", "parquet")
+        idx = self.format_box.findText(current_format)
+        if idx >= 0:
+            self.format_box.setCurrentIndex(idx)
+        layout.addRow("記録方式", self.format_box)
+
+        # 保存先ディレクトリ
+        hbox_dir = QHBoxLayout()
+        self.save_dir_edit = QLineEdit()
+        self.save_dir_edit.setText(self.cfg.get("save_dir", "logs"))
+        btn_browse = QPushButton("参照")
+        def browse_dir():
+            d = QFileDialog.getExistingDirectory(self, "保存先ディレクトリを選択", self.save_dir_edit.text() or "logs")
+            if d:
+                self.save_dir_edit.setText(d)
+        btn_browse.clicked.connect(browse_dir)
+        hbox_dir.addWidget(self.save_dir_edit)
+        hbox_dir.addWidget(btn_browse)
+        layout.addRow("保存先ディレクトリ", hbox_dir)
+
+        # ファイル名テンプレート
+        self.filename_template_edit = QLineEdit()
+        self.filename_template_edit.setPlaceholderText("%Y%m%d_%H%M%S")
+        self.filename_template_edit.setText(self.cfg.get("filename_template", "%Y%m%d_%H%M%S"))
+        layout.addRow("ファイル名テンプレート", self.filename_template_edit)
+
+        # サンプリング間隔（秒）
+        self.sample_interval_spin = QDoubleSpinBox()
+        self.sample_interval_spin.setRange(0.001, 1.0)
+        self.sample_interval_spin.setSingleStep(0.001)
+        self.sample_interval_spin.setValue(self.cfg.get("sample_interval", 0.02))
+        layout.addRow("サンプリング間隔 (秒)", self.sample_interval_spin)
+
+        # ボタン（保存/キャンセル）
+        btn_hbox = QHBoxLayout()
+        self.ok_btn = QPushButton("保存")
+        self.cancel_btn = QPushButton("キャンセル")
+        btn_hbox.addWidget(self.ok_btn)
+        btn_hbox.addWidget(self.cancel_btn)
+        layout.addRow(btn_hbox)
+
+        self.setLayout(layout)
+
+        self.ok_btn.clicked.connect(self.on_accept)
+        self.cancel_btn.clicked.connect(self.reject)
+
+    def on_accept(self):
+        # 簡易バリデーション
+        cfg = load_config()
+        cfg["log_format"] = self.format_box.currentText()
+        cfg["save_dir"] = self.save_dir_edit.text().strip() or "logs"
+        cfg["filename_template"] = self.filename_template_edit.text().strip() or "%Y%m%d_%H%M%S"
+        cfg["sample_interval"] = float(self.sample_interval_spin.value())
+
+        # 保存先ディレクトリがなければ作成
+        try:
+            os.makedirs(cfg["save_dir"], exist_ok=True)
+        except Exception:
+            pass
+
+        save_config(cfg)
+        self.accept()
+
 # メインウィンドウ
 class MainWindow(QWidget):
     def __init__(self):
@@ -131,30 +229,25 @@ class MainWindow(QWidget):
         self.setWindowTitle("Controller Logger (PySide6)")
         self.worker = None
 
-        layout = QVBoxLayout()
-        # 記録方式選択
-        from PySide6.QtWidgets import QComboBox, QLineEdit
-        self.format_box = QComboBox()
-        self.format_box.addItems(["parquet", "csv"])
-        layout.addWidget(QLabel("記録方式"))
-        layout.addWidget(self.format_box)
+        self.config = load_config()
 
-        # ファイル名入力欄（未入力なら自動生成）
+        layout = QVBoxLayout()
+
+        # 設定表示と設定ボタン
+        from PySide6.QtWidgets import QHBoxLayout as _QHBoxLayout
+        h = _QHBoxLayout()
+        self.format_label = QLabel(f"記録方式: {self.config.get('log_format','parquet')}")
+        h.addWidget(self.format_label)
+        self.settings_btn = QPushButton("設定")
+        self.settings_btn.clicked.connect(self.open_settings)
+        h.addWidget(self.settings_btn)
+        layout.addLayout(h)
+
+        # ファイル名入力欄（未入力なら自動生成 / テンプレ適用）
         self.filename_edit = QLineEdit()
-        self.filename_edit.setPlaceholderText("ファイル名（未入力なら自動生成）")
+        self.filename_edit.setPlaceholderText("ファイル名（テンプレートを使用する場合は空欄）")
         layout.addWidget(QLabel("ファイル名"))
         layout.addWidget(self.filename_edit)
-        # config.jsonから記録方式の初期値をセット
-        import json
-        try:
-            with open("config.json", "r", encoding="utf-8") as f:
-                config = json.load(f)
-                default_format = config.get("log_format", "parquet")
-        except Exception:
-            default_format = "parquet"
-        idx = self.format_box.findText(default_format)
-        if idx >= 0:
-            self.format_box.setCurrentIndex(idx)
 
         self.status_label = QLabel("待機中")
         layout.addWidget(self.status_label)
@@ -187,33 +280,31 @@ class MainWindow(QWidget):
         self._ui_defer_timer.setInterval(200)  # 操作終了後に再開
         self._ui_defer_timer.timeout.connect(self._resume_ui_updates)
 
-        # 記録方式変更時にconfig.jsonへ保存
-        def save_format_to_config(format_value):
-            import json
-            try:
-                with open("config.json", "r", encoding="utf-8") as f:
-                    config = json.load(f)
-            except Exception:
-                config = {}
-            config["log_format"] = format_value
-            with open("config.json", "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-
-        self.format_box.currentTextChanged.connect(save_format_to_config)
+    def open_settings(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            # 設定を再読み込みして反映
+            self.config = load_config()
+            self.format_label.setText(f"記録方式: {self.config.get('log_format','parquet')}")
+            # 変更されたサンプリング間隔はワーカー起動時に利用される
 
     def start_logging(self):
         import datetime
-        selected_format = self.format_box.currentText()
+        selected_format = self.config.get("log_format", "parquet")
         ext = ".parquet" if selected_format == "parquet" else ".csv"
         filename = self.filename_edit.text().strip()
         if not filename:
-            filename = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + ext
+            # テンプレート対応
+            template = self.config.get("filename_template", "%Y%m%d_%H%M%S")
+            filename = datetime.datetime.now().strftime(template) + ext
         else:
             # 入力値に拡張子がなければ追加
             if not filename.lower().endswith(ext):
                 filename += ext
-        filepath = filename  # ファイル名のみ渡す（ディレクトリはlogger側で管理）
-        self.worker = LoggerWorkerThread(filepath, interval=0.02, format=selected_format)  # 50Hzに調整
+        save_dir = self.config.get("save_dir", "logs")
+        filepath = os.path.join(save_dir, filename)
+        interval = float(self.config.get("sample_interval", 0.02))
+        self.worker = LoggerWorkerThread(filepath, interval=interval, format=selected_format)  # サンプリング間隔を使用
         # 高頻度シグナルはバッファに保存し、UIはタイマーで更新
         self.worker.status.connect(self.on_worker_status)
         self.worker.update.connect(self.on_worker_update)
@@ -278,4 +369,3 @@ class MainWindow(QWidget):
     def moveEvent(self, event):
         self._pause_ui_updates_temporarily()
         super().moveEvent(event)
-
