@@ -1,12 +1,17 @@
+import os
 import pygame
 import time
 
 
 class InputReader:
     def __init__(self):
+        # ワーカースレッド側で実ウィンドウを作らない（Qtと競合しフリーズの原因）
+        try:
+            if os.name == "nt":
+                os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        except Exception:
+            pass
         pygame.init()
-        # ダミーウィンドウ生成（DirectInput対策・枠なし最小化）
-        pygame.display.set_mode((1, 1), pygame.NOFRAME)
         pygame.joystick.init()
         if pygame.joystick.get_count() == 0:
             raise RuntimeError("ゲームパッドが接続されていません")

@@ -2,16 +2,16 @@ from PySide6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QLabel, QFileDialog,
     QGraphicsScene, QGraphicsView, QGraphicsEllipseItem
 )
-from PySide6.QtCore import QThread, Signal, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPainter
+from PySide6.QtCore import QThread, Signal, QTimer, Qt
+
+import time
 
 from loggers.logger_worker import LoggerWorker
-from PySide6.QtCore import QThread, Signal, QTimer
 
 # PySide6用ラッパースレッド
 class LoggerWorkerThread(QThread):
     status = Signal(str)
-    update = Signal(list, list)  # axes, buttons
+    update = Signal(object, object)  # axes, buttons
 
     def __init__(self, filepath, interval=0.01, format="parquet"):
         super().__init__()
@@ -20,12 +20,29 @@ class LoggerWorkerThread(QThread):
 
     def run(self):
         self._running = True
+        last_update = 0.0
+        last_status = 0.0
+
         def status_callback(msg):
-            self.status.emit(msg)
+            nonlocal last_status
+            now = time.time()
+            # ステータスは約2Hzで送信
+            if now - last_status >= 0.5:
+                self.status.emit(msg)
+                last_status = now
+
         def update_callback(axes, buttons):
-            self.update.emit(axes, buttons)
+            nonlocal last_update
+            now = time.time()
+            # 入力更新は約30Hzで送信
+            if now - last_update >= (1.0 / 30.0):
+                self.update.emit(axes, buttons)
+                last_update = now
+
         def sleep_func(interval):
-            self.msleep(int(interval * 1000))
+            # 最低1msはスリープ
+            self.msleep(max(1, int(interval * 1000)))
+
         self.worker.running = True
         self.worker.run(status_callback, update_callback, sleep_func)
         self._running = False
@@ -40,7 +57,12 @@ class InputDisplayView(QWidget):
         self.setMinimumSize(400, 120)
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
-        self.key_labels = []
+
+        self.label = QLabel("")
+        self.label.setStyleSheet("font-size:32px; color:red; font-weight:bold;")
+        self.label.setWordWrap(True)
+        self.label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.layout.addWidget(self.label)
 
     def update_view(self, axes, buttons):
         active_keys = []
@@ -99,16 +121,8 @@ class InputDisplayView(QWidget):
             if pressed and i < 12:
                 active_keys.append(f"Btn{i+1}")
 
-        # ラベル更新
-        for label in self.key_labels:
-            self.layout.removeWidget(label)
-            label.deleteLater()
-        self.key_labels.clear()
-        for key in active_keys:
-            lbl = QLabel(key)
-            lbl.setStyleSheet("font-size:32px; color:red; font-weight:bold;")
-            self.layout.addWidget(lbl)
-            self.key_labels.append(lbl)
+        text = "\n".join(active_keys) if active_keys else ""
+        self.label.setText(text)
 
 # メインウィンドウ
 class MainWindow(QWidget):
@@ -142,8 +156,8 @@ class MainWindow(QWidget):
         if idx >= 0:
             self.format_box.setCurrentIndex(idx)
 
-        self.label = QLabel("待機中")
-        layout.addWidget(self.label)
+        self.status_label = QLabel("待機中")
+        layout.addWidget(self.status_label)
 
         self.start_btn = QPushButton("記録開始")
         self.start_btn.clicked.connect(self.start_logging)
@@ -158,6 +172,20 @@ class MainWindow(QWidget):
         layout.addWidget(self.input_display)
 
         self.setLayout(layout)
+
+        # UI更新タイマーと最新値バッファ
+        self.latest_axes = []
+        self.latest_buttons = []
+        self.latest_status = "待機中"
+        self.ui_timer = QTimer(self)
+        self.ui_timer.setInterval(33)  # 約30Hz
+        self.ui_timer.setTimerType(Qt.TimerType.CoarseTimer)
+        self.ui_timer.timeout.connect(self.on_ui_timer)
+        # ウィンドウ操作時の一時停止用ディファタイマー
+        self._ui_defer_timer = QTimer(self)
+        self._ui_defer_timer.setSingleShot(True)
+        self._ui_defer_timer.setInterval(200)  # 操作終了後に再開
+        self._ui_defer_timer.timeout.connect(self._resume_ui_updates)
 
         # 記録方式変更時にconfig.jsonへ保存
         def save_format_to_config(format_value):
@@ -185,18 +213,69 @@ class MainWindow(QWidget):
             if not filename.lower().endswith(ext):
                 filename += ext
         filepath = filename  # ファイル名のみ渡す（ディレクトリはlogger側で管理）
-        self.worker = LoggerWorkerThread(filepath, format=selected_format)
-        self.worker.status.connect(self.label.setText)
-        self.worker.update.connect(self.input_display.update_view)
+        self.worker = LoggerWorkerThread(filepath, interval=0.02, format=selected_format)  # 50Hzに調整
+        # 高頻度シグナルはバッファに保存し、UIはタイマーで更新
+        self.worker.status.connect(self.on_worker_status)
+        self.worker.update.connect(self.on_worker_update)
         self.worker.start()
+        # UIタイマー開始（約30Hz）
+        self.latest_status = "記録開始"
+        if hasattr(self, "ui_timer"):
+            self.ui_timer.start()
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.label.setText("記録開始")
+        self.status_label.setText("記録開始")
 
     def stop_logging(self):
+        # UIタイマー停止
+        if hasattr(self, "ui_timer"):
+            self.ui_timer.stop()
         if self.worker:
             self.worker.stop()
             self.worker.wait()
+            self.worker = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.label.setText("停止中")
+        self.latest_status = "停止中"
+        self.status_label.setText("停止中")
+
+    # ワーカーの最新入力をバッファ
+    def on_worker_update(self, axes, buttons):
+        self.latest_axes = list(axes)
+        self.latest_buttons = list(buttons)
+
+    # ワーカーのステータス文字列をバッファ
+    def on_worker_status(self, msg):
+        self.latest_status = msg
+
+    # UIタイマーで表示更新（約30Hz）
+    def on_ui_timer(self):
+        try:
+            self.input_display.update_view(self.latest_axes, self.latest_buttons)
+        except Exception:
+            pass
+        self.status_label.setText(self.latest_status)
+
+    # ウィンドウ操作中はUI更新を一時停止し、操作完了後に再開
+    def _pause_ui_updates_temporarily(self):
+        if self.ui_timer.isActive():
+            self.ui_timer.stop()
+        # 画面更新を抑止（レイアウト・再描画を止める）
+        self.setUpdatesEnabled(False)
+        self._ui_defer_timer.start()
+
+    def _resume_ui_updates(self):
+        # 画面更新を再開
+        self.setUpdatesEnabled(True)
+        self.update()
+        if self.worker:
+            self.ui_timer.start()
+
+    def resizeEvent(self, event):
+        self._pause_ui_updates_temporarily()
+        super().resizeEvent(event)
+
+    def moveEvent(self, event):
+        self._pause_ui_updates_temporarily()
+        super().moveEvent(event)
+
