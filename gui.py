@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QHBoxLayout, QLineEdit, QComboBox,
     QDoubleSpinBox, QListWidget, QListWidgetItem, QTabWidget, QToolBar,
     QStatusBar, QSystemTrayIcon, QMenu, QStyle, QSplitter, QFrame,
-    QSizePolicy, QSpacerItem, QAbstractItemView, QTableView, QHeaderView
+    QSizePolicy, QSpacerItem, QAbstractItemView, QTableView, QHeaderView, QMessageBox
 )
 from PySide6.QtCore import QThread, Signal, QTimer, Qt, QSize, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QIcon, QGuiApplication, QAction
@@ -298,9 +298,11 @@ class SessionListPanel(QWidget):
         self.refresh_btn = QPushButton("更新")
         self.open_dir_btn = QPushButton("フォルダを開く")
         self.open_ext_btn = QPushButton("外部で開く")
+        self.delete_btn = QPushButton("削除")
         btns.addWidget(self.refresh_btn)
         btns.addWidget(self.open_dir_btn)
         btns.addWidget(self.open_ext_btn)
+        btns.addWidget(self.delete_btn)
         btns.addStretch(1)
         left_v.addLayout(btns)
         left_v.addWidget(self.list, 1)
@@ -337,6 +339,7 @@ class SessionListPanel(QWidget):
         self.refresh_btn.clicked.connect(self.reload)
         self.open_dir_btn.clicked.connect(self.open_folder)
         self.open_ext_btn.clicked.connect(self._open_selected_external)
+        self.delete_btn.clicked.connect(self.delete_selected)
 
     def set_directory(self, path: str):
         self._dir = path
@@ -403,6 +406,29 @@ class SessionListPanel(QWidget):
         item = self.list.currentItem()
         if item:
             self.open_item(item)
+
+    def delete_selected(self):
+        path = self._current_path()
+        if not path or not os.path.exists(path):
+            return
+        name = os.path.basename(path)
+        reply = QMessageBox.question(
+            self,
+            "削除の確認",
+            f"{name} を削除しますか？\nこの操作は取り消せません。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                os.remove(path)
+            except Exception as e:
+                QMessageBox.warning(self, "削除失敗", f"削除に失敗しました:\n{e}")
+                return
+            # リストとプレビューを更新
+            self.reload()
+            self._df_model.setDataFrame(pd.DataFrame())
+            self.preview_info.setText("プレビュー: -")
 
     def open_item(self, item: QListWidgetItem):
         d = getattr(self, "_dir", "logs")
