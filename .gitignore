@@ -9,7 +9,7 @@ dist/
 build/
 
 logs/*
-!logs/sample.csv
+!logs/sample/
 
 .DS_Store
 Thumbs.db
