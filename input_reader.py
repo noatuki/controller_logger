@@ -28,6 +28,11 @@ class InputReader:
         timestamp = time.time()
         axes = [self.joystick.get_axis(i) for i in range(self.joystick.get_numaxes())]
         buttons = [self.joystick.get_button(i) for i in range(self.joystick.get_numbuttons())]
+        # D-Pad（十字キー）をbuttons配列に追加
+        if self.joystick.get_numhats() > 0:
+            hat = self.joystick.get_hat(0)  # (x, y)
+            # ↑↓←→をボタンとして追加
+            buttons += [int(hat[1] == 1), int(hat[1] == -1), int(hat[0] == -1), int(hat[0] == 1)]
         return timestamp, axes, buttons
 
     def get_headers(self):
@@ -35,4 +40,6 @@ class InputReader:
         headers = ["timestamp"]
         headers += [f"axis{i}" for i in range(self.joystick.get_numaxes())]
         headers += [f"button{i}" for i in range(self.joystick.get_numbuttons())]
+        if self.joystick.get_numhats() > 0:
+            headers += ["dpad_up", "dpad_down", "dpad_left", "dpad_right"]
         return headers

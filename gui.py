@@ -3,10 +3,10 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView, QGraphicsEllipseItem
 )
 from PySide6.QtCore import QThread, Signal, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QPainter
 
 from loggers.logger_worker import LoggerWorker
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, QTimer
 
 # PySide6用ラッパースレッド
 class LoggerWorkerThread(QThread):
@@ -33,39 +33,82 @@ class LoggerWorkerThread(QThread):
     def stop(self):
         self.worker.stop()
 
-# 仮想コントローラー表示
-class ControllerView(QGraphicsView):
-    def __init__(self):
-        super().__init__()
-        self.scene = QGraphicsScene()
-        self.setScene(self.scene)
-
-        # 左スティック領域
-        self.left_area = QGraphicsEllipseItem(QRectF(0, 0, 80, 80))
-        self.left_area.setBrush(QBrush(Qt.gray))
-        self.scene.addItem(self.left_area)
-
-        self.left_stick = QGraphicsEllipseItem(QRectF(30, 30, 20, 20))
-        self.left_stick.setBrush(QBrush(Qt.red))
-        self.scene.addItem(self.left_stick)
-
-        # Aボタン
-        self.btn_a = QGraphicsEllipseItem(QRectF(150, 20, 20, 20))
-        self.btn_a.setBrush(QBrush(Qt.green))
-        self.scene.addItem(self.btn_a)
+# 入力キー表示用ビュー
+class InputDisplayView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(400, 120)
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+        self.key_labels = []
 
     def update_view(self, axes, buttons):
+        active_keys = []
+
+        # 左スティック（axes[0], axes[1]）8方向判定
+        def stick_dir(x, y):
+            if abs(x) < 0.4 and abs(y) < 0.4:
+                return None
+            dirs = [
+                ("↑",    y < -0.7 and abs(x) < 0.5),
+                ("↓",    y >  0.7 and abs(x) < 0.5),
+                ("←",    x < -0.7 and abs(y) < 0.5),
+                ("→",    x >  0.7 and abs(y) < 0.5),
+                ("↖",    x < -0.5 and y < -0.5),
+                ("↗",    x >  0.5 and y < -0.5),
+                ("↙",    x < -0.5 and y >  0.5),
+                ("↘",    x >  0.5 and y >  0.5),
+            ]
+            for label, cond in dirs:
+                if cond: return label
+            return None
+
         if len(axes) >= 2:
-            x = 30 + axes[0] * 30
-            y = 30 + axes[1] * 30
-            self.left_stick.setRect(x, y, 20, 20)
+            dir_l = stick_dir(axes[0], axes[1])
+            if dir_l: active_keys.append(f"左スティック:{dir_l}")
 
-        if len(buttons) > 0:
-            if buttons[0]:
-                self.btn_a.setBrush(QBrush(QColor("yellow")))
-            else:
-                self.btn_a.setBrush(QBrush(Qt.green))
+        # 右スティック（axes[2], axes[3]）8方向判定
+        if len(axes) >= 4:
+            dir_r = stick_dir(axes[2], axes[3])
+            if dir_r: active_keys.append(f"右スティック:{dir_r}")
 
+        # D-Pad（buttons配列末尾4つ: up, down, left, right）＋斜め判定
+        if len(buttons) >= 4:
+            up, down, left, right = buttons[-4], buttons[-3], buttons[-2], buttons[-1]
+            # 斜め判定
+            if up and left:
+                active_keys.append("D-Pad:↖")
+            if up and right:
+                active_keys.append("D-Pad:↗")
+            if down and left:
+                active_keys.append("D-Pad:↙")
+            if down and right:
+                active_keys.append("D-Pad:↘")
+            # 単方向
+            if up and not (left or right):
+                active_keys.append("D-Pad:↑")
+            if down and not (left or right):
+                active_keys.append("D-Pad:↓")
+            if left and not (up or down):
+                active_keys.append("D-Pad:←")
+            if right and not (up or down):
+                active_keys.append("D-Pad:→")
+
+        # ボタン入力（ボタン数に応じて動的ラベル）
+        for i, pressed in enumerate(buttons):
+            if pressed and i < 12:
+                active_keys.append(f"Btn{i+1}")
+
+        # ラベル更新
+        for label in self.key_labels:
+            self.layout.removeWidget(label)
+            label.deleteLater()
+        self.key_labels.clear()
+        for key in active_keys:
+            lbl = QLabel(key)
+            lbl.setStyleSheet("font-size:32px; color:red; font-weight:bold;")
+            self.layout.addWidget(lbl)
+            self.key_labels.append(lbl)
 
 # メインウィンドウ
 class MainWindow(QWidget):
@@ -111,8 +154,8 @@ class MainWindow(QWidget):
         self.stop_btn.clicked.connect(self.stop_logging)
         layout.addWidget(self.stop_btn)
 
-        self.controller_view = ControllerView()
-        layout.addWidget(self.controller_view)
+        self.input_display = InputDisplayView()
+        layout.addWidget(self.input_display)
 
         self.setLayout(layout)
 
@@ -144,7 +187,7 @@ class MainWindow(QWidget):
         filepath = filename  # ファイル名のみ渡す（ディレクトリはlogger側で管理）
         self.worker = LoggerWorkerThread(filepath, format=selected_format)
         self.worker.status.connect(self.label.setText)
-        self.worker.update.connect(self.controller_view.update_view)
+        self.worker.update.connect(self.input_display.update_view)
         self.worker.start()
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
