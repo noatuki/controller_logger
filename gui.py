@@ -3,14 +3,15 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QHBoxLayout, QLineEdit, QComboBox,
     QDoubleSpinBox, QListWidget, QListWidgetItem, QTabWidget, QToolBar,
     QStatusBar, QSystemTrayIcon, QMenu, QStyle, QSplitter, QFrame,
-    QSizePolicy, QSpacerItem, QAbstractItemView
+    QSizePolicy, QSpacerItem, QAbstractItemView, QTableView, QHeaderView
 )
-from PySide6.QtCore import QThread, Signal, QTimer, Qt, QSize
+from PySide6.QtCore import QThread, Signal, QTimer, Qt, QSize, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QIcon, QGuiApplication, QAction
 
 import time
 import os
 import json
+import pandas as pd
 import datetime
 import sys
 
@@ -239,26 +240,103 @@ class SettingsDialog(QDialog):
         save_config(cfg)
         self.accept()
 
+class DataFrameModel(QAbstractTableModel):
+    def __init__(self, df: "pd.DataFrame|None" = None, parent=None, float_format="{:.3f}".format):
+        super().__init__(parent)
+        self._df = df if df is not None else pd.DataFrame()
+        self._float_format = float_format
+
+    def setDataFrame(self, df: "pd.DataFrame"):
+        self.beginResetModel()
+        self._df = df
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._df.index)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._df.columns)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or role != Qt.DisplayRole:
+            return None
+        val = self._df.iat[index.row(), index.column()]
+        if pd.isna(val):
+            return ""
+        if isinstance(val, float):
+            try:
+                return self._float_format(val)
+            except Exception:
+                return str(val)
+        return str(val)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            if 0 <= section < len(self._df.columns):
+                return str(self._df.columns[section])
+        else:
+            # 1-based row numbers for readability
+            return str(section + 1)
+        return None
+
 class SessionListPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._max_preview_rows = 1000
+
+        # 左: ファイル一覧 + 操作
         self.list = QListWidget()
         self.list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.list.itemActivated.connect(self.open_item)
+        self.list.itemSelectionChanged.connect(self._on_selection_changed)
 
+        left_box = QWidget()
+        left_v = QVBoxLayout(left_box)
         btns = QHBoxLayout()
         self.refresh_btn = QPushButton("更新")
         self.open_dir_btn = QPushButton("フォルダを開く")
+        self.open_ext_btn = QPushButton("外部で開く")
         btns.addWidget(self.refresh_btn)
         btns.addWidget(self.open_dir_btn)
+        btns.addWidget(self.open_ext_btn)
         btns.addStretch(1)
+        left_v.addLayout(btns)
+        left_v.addWidget(self.list, 1)
+
+        # 右: プレビュー
+        right_box = QWidget()
+        right_v = QVBoxLayout(right_box)
+        self.preview_info = QLabel("プレビュー: -")
+        self.preview_info.setStyleSheet("color:#B0BEC5;")
+        right_v.addWidget(self.preview_info)
+        self.table = QTableView()
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(False)
+        self.table.setWordWrap(False)
+        self.table.setEditTriggers(QTableView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.verticalHeader().setVisible(True)
+        self._df_model = DataFrameModel(pd.DataFrame())
+        self.table.setModel(self._df_model)
+        right_v.addWidget(self.table, 1)
+
+        # スプリッタで左右に配置
+        split = QSplitter()
+        split.addWidget(left_box)
+        split.addWidget(right_box)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(btns)
-        layout.addWidget(self.list, 1)
+        layout.addWidget(split)
 
+        # イベント
         self.refresh_btn.clicked.connect(self.reload)
         self.open_dir_btn.clicked.connect(self.open_folder)
+        self.open_ext_btn.clicked.connect(self._open_selected_external)
 
     def set_directory(self, path: str):
         self._dir = path
@@ -274,8 +352,43 @@ class SessionListPanel(QWidget):
             for f in files:
                 item = QListWidgetItem(f)
                 self.list.addItem(item)
+            # 初期選択で即プレビュー
+            if self.list.count() > 0:
+                self.list.setCurrentRow(0)
         except Exception:
             pass
+
+    def _current_path(self):
+        d = getattr(self, "_dir", "logs")
+        item = self.list.currentItem()
+        if not item:
+            return None
+        return os.path.join(d, item.text())
+
+    def _on_selection_changed(self):
+        self._load_preview(self._current_path())
+
+    def _load_preview(self, path: str | None):
+        if not path or not os.path.exists(path):
+            self._df_model.setDataFrame(pd.DataFrame())
+            self.preview_info.setText("プレビュー: -")
+            return
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".csv":
+                df = pd.read_csv(path, nrows=self._max_preview_rows)
+            elif ext == ".parquet":
+                df = pd.read_parquet(path)
+                if len(df) > self._max_preview_rows:
+                    df = df.head(self._max_preview_rows)
+            else:
+                df = pd.DataFrame()
+            self._df_model.setDataFrame(df)
+            note = "(先頭 {}/{} 行表示)".format(len(df), "?" if ext == ".csv" and len(df) == self._max_preview_rows else len(df))
+            self.preview_info.setText(f"プレビュー: {os.path.basename(path)} {note}")
+        except Exception as e:
+            self._df_model.setDataFrame(pd.DataFrame())
+            self.preview_info.setText(f"プレビュー失敗: {os.path.basename(path)} ({e})")
 
     def open_folder(self):
         d = getattr(self, "_dir", "logs")
@@ -285,6 +398,11 @@ class SessionListPanel(QWidget):
             os.system(f'open "{os.path.abspath(d)}"')
         else:
             os.system(f'xdg-open "{os.path.abspath(d)}"')
+
+    def _open_selected_external(self):
+        item = self.list.currentItem()
+        if item:
+            self.open_item(item)
 
     def open_item(self, item: QListWidgetItem):
         d = getattr(self, "_dir", "logs")
