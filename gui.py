@@ -3,7 +3,8 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QHBoxLayout, QLineEdit, QComboBox,
     QDoubleSpinBox, QListWidget, QListWidgetItem, QTabWidget, QToolBar,
     QStatusBar, QSystemTrayIcon, QMenu, QStyle, QSplitter, QFrame,
-    QSizePolicy, QSpacerItem, QAbstractItemView, QTableView, QHeaderView, QMessageBox
+    QSizePolicy, QSpacerItem, QAbstractItemView, QTableView, QHeaderView, QMessageBox,
+    QGroupBox, QRadioButton, QSlider
 )
 from PySide6.QtCore import QThread, Signal, QTimer, Qt, QSize, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QIcon, QGuiApplication, QAction
@@ -240,6 +241,184 @@ class SettingsDialog(QDialog):
         save_config(cfg)
         self.accept()
 
+class SettingsPanel(QWidget):
+    saved = Signal(dict)
+
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self._cfg = dict(cfg) if cfg else {}
+        root = QVBoxLayout(self)
+
+        # 記録方式
+        gb_format = QGroupBox("記録方式")
+        f_l = QHBoxLayout()
+        self.radio_parquet = QRadioButton("parquet")
+        self.radio_csv = QRadioButton("csv")
+        fmt = self._cfg.get("log_format", "parquet")
+        (self.radio_parquet if fmt == "parquet" else self.radio_csv).setChecked(True)
+        f_l.addWidget(self.radio_parquet)
+        f_l.addWidget(self.radio_csv)
+        f_l.addStretch(1)
+        gb_format.setLayout(f_l)
+        root.addWidget(gb_format)
+
+        # 保存先ディレクトリ
+        gb_dir = QGroupBox("保存先ディレクトリ")
+        d_l = QHBoxLayout()
+        self.edit_dir = QLineEdit(self._cfg.get("save_dir", "logs"))
+        self.btn_browse = QPushButton("参照")
+        self.dir_status = QLabel("")
+        self.dir_status.setStyleSheet("color:#B0BEC5;")
+        d_l.addWidget(self.edit_dir, 1)
+        d_l.addWidget(self.btn_browse)
+        d_l.addWidget(self.dir_status)
+        gb_dir.setLayout(d_l)
+        root.addWidget(gb_dir)
+
+        # ファイル名テンプレート
+        gb_tmpl = QGroupBox("ファイル名テンプレート")
+        t_l = QVBoxLayout()
+        row = QHBoxLayout()
+        self.edit_tmpl = QLineEdit(self._cfg.get("filename_template", "%Y%m%d_%H%M%S"))
+        self.edit_tmpl.setPlaceholderText("%Y%m%d_%H%M%S")
+        self.preview_label = QLabel("例: -")
+        self.preview_label.setStyleSheet("color:#B0BEC5;")
+        row.addWidget(self.edit_tmpl, 1)
+        t_l.addLayout(row)
+        t_l.addWidget(self.preview_label)
+        gb_tmpl.setLayout(t_l)
+        root.addWidget(gb_tmpl)
+
+        # サンプリング間隔
+        gb_sample = QGroupBox("サンプリング間隔")
+        s_l = QHBoxLayout()
+        self.slider_ms = QSlider(Qt.Horizontal)
+        self.slider_ms.setRange(1, 1000)  # 1ms - 1000ms
+        ms = int(float(self._cfg.get("sample_interval", 0.02)) * 1000)
+        self.slider_ms.setValue(max(1, min(1000, ms)))
+        self.spin_sec = QDoubleSpinBox()
+        self.spin_sec.setRange(0.001, 1.0)
+        self.spin_sec.setSingleStep(0.001)
+        self.spin_sec.setDecimals(3)
+        self.spin_sec.setValue(self.slider_ms.value() / 1000.0)
+        self.hz_label = QLabel("")
+        self.hz_label.setStyleSheet("color:#B0BEC5;")
+        s_l.addWidget(QLabel("ms:"))
+        s_l.addWidget(self.slider_ms, 1)
+        s_l.addSpacing(8)
+        s_l.addWidget(QLabel("sec:"))
+        s_l.addWidget(self.spin_sec)
+        s_l.addSpacing(8)
+        s_l.addWidget(self.hz_label)
+        gb_sample.setLayout(s_l)
+        root.addWidget(gb_sample)
+
+        # ボタン
+        btns = QHBoxLayout()
+        self.btn_apply = QPushButton("適用")
+        self.btn_reset = QPushButton("リセット")
+        self.btn_defaults = QPushButton("初期値に戻す")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_defaults)
+        btns.addWidget(self.btn_reset)
+        btns.addWidget(self.btn_apply)
+        root.addLayout(btns)
+
+        # 接続
+        self.btn_browse.clicked.connect(self._browse_dir)
+        self.edit_dir.textChanged.connect(self._update_dir_status)
+        self.radio_parquet.toggled.connect(self._update_preview)
+        self.radio_csv.toggled.connect(self._update_preview)
+        self.edit_tmpl.textChanged.connect(self._update_preview)
+        self.slider_ms.valueChanged.connect(self._sync_from_slider)
+        self.spin_sec.valueChanged.connect(self._sync_from_spin)
+        self.btn_apply.clicked.connect(self._apply)
+        self.btn_reset.clicked.connect(self._reset)
+        self.btn_defaults.clicked.connect(self._defaults)
+
+        # 初期表示
+        self._update_dir_status()
+        self._update_preview()
+        self._update_hz()
+
+    def _browse_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "保存先ディレクトリを選択", self.edit_dir.text() or "logs")
+        if d:
+            self.edit_dir.setText(d)
+
+    def _update_dir_status(self):
+        d = self.edit_dir.text().strip()
+        if os.path.isdir(d):
+            self.dir_status.setText("存在します")
+            self.dir_status.setStyleSheet("color:#8BC34A;")
+        else:
+            self.dir_status.setText("未作成（保存時に作成）")
+            self.dir_status.setStyleSheet("color:#FFC107;")
+
+    def _current_ext(self):
+        return ".parquet" if self.radio_parquet.isChecked() else ".csv"
+
+    def _update_preview(self):
+        try:
+            now = datetime.datetime.now()
+            tmpl = self.edit_tmpl.text().strip() or "%Y%m%d_%H%M%S"
+            name = now.strftime(tmpl) + self._current_ext()
+            self.preview_label.setText(f"例: {name}")
+        except Exception:
+            self.preview_label.setText("例: -")
+
+    def _update_hz(self):
+        sec = max(0.001, float(self.spin_sec.value()))
+        hz = 1.0 / sec
+        self.hz_label.setText(f"{hz:.1f} Hz")
+
+    def _sync_from_slider(self, v: int):
+        self.spin_sec.blockSignals(True)
+        self.spin_sec.setValue(v / 1000.0)
+        self.spin_sec.blockSignals(False)
+        self._update_hz()
+
+    def _sync_from_spin(self, v: float):
+        val = int(max(1, min(1000, int(round(v * 1000)))))
+        self.slider_ms.blockSignals(True)
+        self.slider_ms.setValue(val)
+        self.slider_ms.blockSignals(False)
+        self._update_hz()
+
+    def _apply(self):
+        cfg = load_config()
+        cfg["log_format"] = "parquet" if self.radio_parquet.isChecked() else "csv"
+        cfg["save_dir"] = self.edit_dir.text().strip() or "logs"
+        cfg["filename_template"] = self.edit_tmpl.text().strip() or "%Y%m%d_%H%M%S"
+        cfg["sample_interval"] = float(self.spin_sec.value())
+        try:
+            os.makedirs(cfg["save_dir"], exist_ok=True)
+        except Exception:
+            pass
+        save_config(cfg)
+        self.saved.emit(cfg)
+
+    def _reset(self):
+        cfg = load_config()
+        self.radio_parquet.setChecked(cfg.get("log_format", "parquet") == "parquet")
+        self.radio_csv.setChecked(cfg.get("log_format", "parquet") == "csv")
+        self.edit_dir.setText(cfg.get("save_dir", "logs"))
+        self.edit_tmpl.setText(cfg.get("filename_template", "%Y%m%d_%H%M%S"))
+        self.spin_sec.setValue(float(cfg.get("sample_interval", 0.02)))
+        self._update_preview()
+        self._update_dir_status()
+        self._update_hz()
+
+    def _defaults(self):
+        self.radio_parquet.setChecked(True)
+        self.radio_csv.setChecked(False)
+        self.edit_dir.setText("logs")
+        self.edit_tmpl.setText("%Y%m%d_%H%M%S")
+        self.spin_sec.setValue(0.02)
+        self._update_preview()
+        self._update_dir_status()
+        self._update_hz()
+
 class DataFrameModel(QAbstractTableModel):
     def __init__(self, df: "pd.DataFrame|None" = None, parent=None, float_format="{:.3f}".format):
         super().__init__(parent)
@@ -280,6 +459,184 @@ class DataFrameModel(QAbstractTableModel):
             # 1-based row numbers for readability
             return str(section + 1)
         return None
+
+class SettingsPanel(QWidget):
+    saved = Signal(dict)
+
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self._cfg = dict(cfg) if cfg else {}
+        root = QVBoxLayout(self)
+
+        # 記録方式
+        gb_format = QGroupBox("記録方式")
+        f_l = QHBoxLayout()
+        self.radio_parquet = QRadioButton("parquet")
+        self.radio_csv = QRadioButton("csv")
+        fmt = self._cfg.get("log_format", "parquet")
+        (self.radio_parquet if fmt == "parquet" else self.radio_csv).setChecked(True)
+        f_l.addWidget(self.radio_parquet)
+        f_l.addWidget(self.radio_csv)
+        f_l.addStretch(1)
+        gb_format.setLayout(f_l)
+        root.addWidget(gb_format)
+
+        # 保存先ディレクトリ
+        gb_dir = QGroupBox("保存先ディレクトリ")
+        d_l = QHBoxLayout()
+        self.edit_dir = QLineEdit(self._cfg.get("save_dir", "logs"))
+        self.btn_browse = QPushButton("参照")
+        self.dir_status = QLabel("")
+        self.dir_status.setStyleSheet("color:#B0BEC5;")
+        d_l.addWidget(self.edit_dir, 1)
+        d_l.addWidget(self.btn_browse)
+        d_l.addWidget(self.dir_status)
+        gb_dir.setLayout(d_l)
+        root.addWidget(gb_dir)
+
+        # ファイル名テンプレート
+        gb_tmpl = QGroupBox("ファイル名テンプレート")
+        t_l = QVBoxLayout()
+        row = QHBoxLayout()
+        self.edit_tmpl = QLineEdit(self._cfg.get("filename_template", "%Y%m%d_%H%M%S"))
+        self.edit_tmpl.setPlaceholderText("%Y%m%d_%H%M%S")
+        self.preview_label = QLabel("例: -")
+        self.preview_label.setStyleSheet("color:#B0BEC5;")
+        row.addWidget(self.edit_tmpl, 1)
+        t_l.addLayout(row)
+        t_l.addWidget(self.preview_label)
+        gb_tmpl.setLayout(t_l)
+        root.addWidget(gb_tmpl)
+
+        # サンプリング間隔
+        gb_sample = QGroupBox("サンプリング間隔")
+        s_l = QHBoxLayout()
+        self.slider_ms = QSlider(Qt.Horizontal)
+        self.slider_ms.setRange(1, 1000)  # 1ms - 1000ms
+        ms = int(float(self._cfg.get("sample_interval", 0.02)) * 1000)
+        self.slider_ms.setValue(max(1, min(1000, ms)))
+        self.spin_sec = QDoubleSpinBox()
+        self.spin_sec.setRange(0.001, 1.0)
+        self.spin_sec.setSingleStep(0.001)
+        self.spin_sec.setDecimals(3)
+        self.spin_sec.setValue(self.slider_ms.value() / 1000.0)
+        self.hz_label = QLabel("")
+        self.hz_label.setStyleSheet("color:#B0BEC5;")
+        s_l.addWidget(QLabel("ms:"))
+        s_l.addWidget(self.slider_ms, 1)
+        s_l.addSpacing(8)
+        s_l.addWidget(QLabel("sec:"))
+        s_l.addWidget(self.spin_sec)
+        s_l.addSpacing(8)
+        s_l.addWidget(self.hz_label)
+        gb_sample.setLayout(s_l)
+        root.addWidget(gb_sample)
+
+        # ボタン
+        btns = QHBoxLayout()
+        self.btn_apply = QPushButton("適用")
+        self.btn_reset = QPushButton("リセット")
+        self.btn_defaults = QPushButton("初期値に戻す")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_defaults)
+        btns.addWidget(self.btn_reset)
+        btns.addWidget(self.btn_apply)
+        root.addLayout(btns)
+
+        # 接続
+        self.btn_browse.clicked.connect(self._browse_dir)
+        self.edit_dir.textChanged.connect(self._update_dir_status)
+        self.radio_parquet.toggled.connect(self._update_preview)
+        self.radio_csv.toggled.connect(self._update_preview)
+        self.edit_tmpl.textChanged.connect(self._update_preview)
+        self.slider_ms.valueChanged.connect(self._sync_from_slider)
+        self.spin_sec.valueChanged.connect(self._sync_from_spin)
+        self.btn_apply.clicked.connect(self._apply)
+        self.btn_reset.clicked.connect(self._reset)
+        self.btn_defaults.clicked.connect(self._defaults)
+
+        # 初期表示
+        self._update_dir_status()
+        self._update_preview()
+        self._update_hz()
+
+    def _browse_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "保存先ディレクトリを選択", self.edit_dir.text() or "logs")
+        if d:
+            self.edit_dir.setText(d)
+
+    def _update_dir_status(self):
+        d = self.edit_dir.text().strip()
+        if os.path.isdir(d):
+            self.dir_status.setText("存在します")
+            self.dir_status.setStyleSheet("color:#8BC34A;")
+        else:
+            self.dir_status.setText("未作成（保存時に作成）")
+            self.dir_status.setStyleSheet("color:#FFC107;")
+
+    def _current_ext(self):
+        return ".parquet" if self.radio_parquet.isChecked() else ".csv"
+
+    def _update_preview(self):
+        try:
+            now = datetime.datetime.now()
+            tmpl = self.edit_tmpl.text().strip() or "%Y%m%d_%H%M%S"
+            name = now.strftime(tmpl) + self._current_ext()
+            self.preview_label.setText(f"例: {name}")
+        except Exception:
+            self.preview_label.setText("例: -")
+
+    def _update_hz(self):
+        sec = max(0.001, float(self.spin_sec.value()))
+        hz = 1.0 / sec
+        self.hz_label.setText(f"{hz:.1f} Hz")
+
+    def _sync_from_slider(self, v: int):
+        self.spin_sec.blockSignals(True)
+        self.spin_sec.setValue(v / 1000.0)
+        self.spin_sec.blockSignals(False)
+        self._update_hz()
+
+    def _sync_from_spin(self, v: float):
+        val = int(max(1, min(1000, int(round(v * 1000)))))
+        self.slider_ms.blockSignals(True)
+        self.slider_ms.setValue(val)
+        self.slider_ms.blockSignals(False)
+        self._update_hz()
+
+    def _apply(self):
+        cfg = load_config()
+        cfg["log_format"] = "parquet" if self.radio_parquet.isChecked() else "csv"
+        cfg["save_dir"] = self.edit_dir.text().strip() or "logs"
+        cfg["filename_template"] = self.edit_tmpl.text().strip() or "%Y%m%d_%H%M%S"
+        cfg["sample_interval"] = float(self.spin_sec.value())
+        try:
+            os.makedirs(cfg["save_dir"], exist_ok=True)
+        except Exception:
+            pass
+        save_config(cfg)
+        self.saved.emit(cfg)
+
+    def _reset(self):
+        cfg = load_config()
+        self.radio_parquet.setChecked(cfg.get("log_format", "parquet") == "parquet")
+        self.radio_csv.setChecked(cfg.get("log_format", "parquet") == "csv")
+        self.edit_dir.setText(cfg.get("save_dir", "logs"))
+        self.edit_tmpl.setText(cfg.get("filename_template", "%Y%m%d_%H%M%S"))
+        self.spin_sec.setValue(float(cfg.get("sample_interval", 0.02)))
+        self._update_preview()
+        self._update_dir_status()
+        self._update_hz()
+
+    def _defaults(self):
+        self.radio_parquet.setChecked(True)
+        self.radio_csv.setChecked(False)
+        self.edit_dir.setText("logs")
+        self.edit_tmpl.setText("%Y%m%d_%H%M%S")
+        self.spin_sec.setValue(0.02)
+        self._update_preview()
+        self._update_dir_status()
+        self._update_hz()
 
 class SessionListPanel(QWidget):
     def __init__(self, parent=None):
@@ -548,17 +905,10 @@ class MainWindow(QMainWindow):
         self.sessions_panel.set_directory(self.config.get("save_dir", "logs"))
         self.tabs.addTab(self.sessions_panel, "セッション")
 
-        # 設定タブ（簡易表示 + ダイアログ起動）
-        settings_tab = QWidget()
-        s_layout = QVBoxLayout(settings_tab)
-        s_layout.addWidget(QLabel("現在の設定"))
-        self.settings_summary = QLabel("")
-        self.settings_summary.setStyleSheet("color:#B0BEC5;")
-        s_layout.addWidget(self.settings_summary)
-        btn_open_settings = QPushButton("設定を開く")
-        s_layout.addWidget(btn_open_settings)
-        s_layout.addStretch(1)
-        self.tabs.addTab(settings_tab, "設定")
+        # 設定タブ（リッチ編集UI）
+        self.settings_panel = SettingsPanel(self.config)
+        self.settings_panel.saved.connect(self._on_settings_saved)
+        self.tabs.addTab(self.settings_panel, "設定")
 
         # スプリッタ
         splitter = QSplitter()
@@ -611,9 +961,9 @@ class MainWindow(QMainWindow):
         # イベント接続
         self.action_start.triggered.connect(self.start_logging)
         self.action_stop.triggered.connect(self.stop_logging)
-        self.action_settings.triggered.connect(self.open_settings)
+        self.action_settings.triggered.connect(lambda: self._navigate(2))
         self.save_dir_btn.clicked.connect(self.choose_save_dir)
-        btn_open_settings.clicked.connect(self.open_settings)
+        # 設定はインライン編集に変更
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # UI更新タイマーと最新値バッファ
@@ -745,7 +1095,15 @@ class MainWindow(QMainWindow):
             self.sessions_panel.set_directory(self.config.get("save_dir", "logs"))
             self._update_settings_summary()
 
+    def _on_settings_saved(self, cfg: dict):
+        # 保存された設定を反映
+        self.config = dict(cfg)
+        self.format_label.setText(f"記録方式: {self.config.get('log_format','parquet')}")
+        self.sessions_panel.set_directory(self.config.get("save_dir", "logs"))
+        self._update_settings_summary()
+
     def _update_settings_summary(self):
+        # 設定タブは詳細編集UIだが、簡易サマリは保持（ステータス更新用）
         cfg = self.config
         summary = (
             f"記録方式: {cfg.get('log_format','parquet')}\n"
@@ -753,7 +1111,8 @@ class MainWindow(QMainWindow):
             f"ファイル名テンプレート: {cfg.get('filename_template','%Y%m%d_%H%M%S')}\n"
             f"サンプリング間隔: {cfg.get('sample_interval',0.02)} 秒"
         )
-        self.settings_summary.setText(summary)
+        # ステータスバー右側に表示
+        self.status_info.setText(f"{cfg.get('log_format','parquet')} | {cfg.get('save_dir','logs')}")
 
     def _default_filename(self):
         template = self.config.get("filename_template", "%Y%m%d_%H%M%S")
