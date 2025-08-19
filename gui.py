@@ -76,11 +76,17 @@ class MainWindow(QWidget):
 
         layout = QVBoxLayout()
         # 記録方式選択
-        from PySide6.QtWidgets import QComboBox
+        from PySide6.QtWidgets import QComboBox, QLineEdit
         self.format_box = QComboBox()
         self.format_box.addItems(["parquet", "csv"])
         layout.addWidget(QLabel("記録方式"))
         layout.addWidget(self.format_box)
+
+        # ファイル名入力欄（未入力なら自動生成）
+        self.filename_edit = QLineEdit()
+        self.filename_edit.setPlaceholderText("ファイル名（未入力なら自動生成）")
+        layout.addWidget(QLabel("ファイル名"))
+        layout.addWidget(self.filename_edit)
         # config.jsonから記録方式の初期値をセット
         import json
         try:
@@ -125,10 +131,17 @@ class MainWindow(QWidget):
         self.format_box.currentTextChanged.connect(save_format_to_config)
 
     def start_logging(self):
-        filepath, _ = QFileDialog.getSaveFileName(self, "保存先を選択", "logs/", "CSV Files (*.csv)")
-        if not filepath:
-            return
+        import datetime
         selected_format = self.format_box.currentText()
+        ext = ".parquet" if selected_format == "parquet" else ".csv"
+        filename = self.filename_edit.text().strip()
+        if not filename:
+            filename = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + ext
+        else:
+            # 入力値に拡張子がなければ追加
+            if not filename.lower().endswith(ext):
+                filename += ext
+        filepath = filename  # ファイル名のみ渡す（ディレクトリはlogger側で管理）
         self.worker = LoggerWorkerThread(filepath, format=selected_format)
         self.worker.status.connect(self.label.setText)
         self.worker.update.connect(self.controller_view.update_view)
